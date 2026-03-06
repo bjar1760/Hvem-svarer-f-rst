@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="da">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Hvem svarer først (bogstav + kategori, med fjernelse)</title>
+<style>
+  :root{
+    --bg:#f5f7fb; --card:#ffffff; --ink:#0f172a; --muted:#475569; --btn:#2563eb;
+    /* Hvis din pil-graphic har spidsen OPAD i udgangspunktet,
+       så sæt --baseRot: 180deg;  (ellers lad den være 0deg) */
+    --baseRot: 0deg;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; min-height:100svh; display:grid; place-items:center;
+    font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+    background:var(--bg); color:var(--ink);
+  }
+  .app{
+    width:min(92vw,860px); background:var(--card); border-radius:16px; padding:20px;
+    box-shadow:0 10px 30px rgba(0,0,0,.08); border:1px solid rgba(2,6,23,.06);
+  }
+  h1{margin:0 0 6px; font-size:clamp(18px,2.8vw,24px)}
+  p{margin:0 0 12px; color:var(--muted)}
+
+  .stage{display:grid; justify-items:center; gap:10px; margin-top:6px}
+
+  /* Container til hjul + pil */
+  .wheel-wrap{
+    position:relative; width:min(86vw,560px); aspect-ratio:1 / 1; display:grid; place-items:center;
+  }
+  canvas#wheel{
+    width:100%; height:auto; display:block; background:#fff; border-radius:50%;
+    box-shadow:0 12px 28px rgba(0,0,0,.12);
+  }
+
+  /* 🔽 PILEN: sort PNG i midten, roterer om spidsen (bund-center) */
+  #pointer{
+    position:absolute;
+    left:50%;
+    top:50%;
+    /* bund af billedet skal ramme center af hjulet → -100% i Y */
+    transform: translate(-50%, -100%) rotate(calc(var(--baseRot) + var(--angle, 0deg)));
+    transform-origin: 50% 100%;
+    width:45%;                /* skalerbar; ~22% af hjulbredden */
+    height:auto;
+    pointer-events:none; user-select:none; z-index:5;
+    filter: drop-shadow(0 2px 4px rgba(0,0,0,.25));
+    transition: transform 0s; /* sættes til animation dynamisk i JS */
+  }
+
+  .controls{margin-top:12px; display:grid; gap:10px; justify-items:center}
+  .btns{display:flex; gap:10px; flex-wrap:wrap; justify-content:center}
+  button{
+    background:var(--btn); color:#fff; border:none; padding:12px 18px;
+    border-radius:10px; font-weight:700; font-size:16px; cursor:pointer;
+    box-shadow:0 8px 18px rgba(37,99,235,.25);
+  }
+  button:disabled{opacity:.6; cursor:not-allowed; box-shadow:none}
+
+  .readout{display:grid; gap:6px; margin-top:6px; text-align:center}
+  .pill{
+    padding:8px 12px; border-radius:10px; border:1px dashed rgba(2,6,23,.12);
+    font-weight:800; font-size:20px; min-width:280px
+  }
+  .meta{font-size:12px; color:var(--muted)}
+
+  /* Fejlvisning hvis noget går galt i JS */
+  #errorBox{
+    display:none; margin-top:8px; background:#fef2f2; color:#991b1b;
+    border:1px solid #fecaca; border-radius:10px; padding:8px 10px; font-size:12px;
+    white-space:pre-wrap; width:min(92vw,560px)
+  }
+</style>
+</head>
+<body>
+  <div class="app" role="application" aria-label="Lykkehjul med alfabet og kategori">
+    <h1>🎯 Hvem svarer først</h1>
+    <p>To knapper: <b>Spin bogstav</b> og <b>Ny kategori</b>. Kategorier fjernes automatisk efter brug.</p>
+
+    <div class="stage">
+      <div class="wheel-wrap">
+        <canvas id="wheel" width="600" height="600" aria-label="Alfabet-lykkehjul"></canvas>
+        <!-- Sort grafisk pil (PNG med gennemsigtig baggrund) -->
+        <img id="pointer" src="pointer-black.png" alt="Sort pil">
+      </div>
+
+      <div class="controls">
+        <div class="btns">
+          <button id="spinBtn" type="button">🔁 SPIN bogstav</button>
+          <button id="nextCatBtn" type="button">🗂️ Ny kategori</button>
+        </div>
+        <div class="readout">
+          <div id="letterOut"   class="pill">Bogstav: —</div>
+          <div id="categoryOut" class="pill">Kategori: —</div>
+          <div id="metaInfo" class="meta">Kategorier tilbage: —</div>
+        </div>
+        <div id="errorBox" aria-live="polite"></div>
+      </div>
+    </div>
+  </div>
+
+<script>
+/* ---------- Sikkerhedsnet: vis fejl på siden ---------- */
+(function(){
+  const box = document.getElementById('errorBox');
+  window.addEventListener('error', e => { box.style.display='block'; box.textContent='Fejl: '+(e.message||e.toString()); });
+  window.addEventListener('unhandledrejection', e => { box.style.display='block'; box.textContent='Promise-fejl: '+(e.reason?.message||e.reason); });
+})();
+
+/* ---------- Data ---------- */
+const LETTERS = ["A","B","C","D","E","F","G","H","I","J",
+                 "K","L","M","N","O","P","Q","R","S","T",
+                 "U","V","W","X","Y","Z","Æ","Ø","Å"];
+
+// Masterliste til auto-genopfyldning
+const MASTER_CATEGORIES = [
+  // Litteratur
+  "Bøger","Forfattere","Eventyr",
+  // Film & TV
+  "Film","Tv-serier",
+  // Musik & personer
+  "Musikere","Danske sangere","Bands","Sangtitler","Skuespillere","Danske skuespillere","Kendisser",
+  // Dyr – detaljeret
+  "Pattedyr","Rovdyr","Kæledyr","Husdyr","Havdyr","Fugle","Insekter",
+  // Geografi
+  "Hovedstæder","Europæiske byer","Byer i Danmark","Europæiske lande","Lande","Storbyer",
+  // Ting / hverdag
+  "Ting i køkkenet","Ting på badeværelset","Skoleting","Elektronik","Legetøj","Værktøj","Ting udenfor","Madvarer","Drikkevarer","Slik","Desserter","Junk-food","Snacks","Sodavand","Varme drikke","Mærkevarer","Frugter",
+  // Sport & sprog
+  "Sportsgrene","Boldspil","Fodboldklubber","Olympiske discipliner","Udendørs sport","Navneord","Tillægsord","Ord fra sport","Ord fra skolen",
+  // Popkultur / børnevenligt
+  "Tegnefilms-figurer","Superhelte","Roblox-games",
+];
+
+let CATEGORIES = [...MASTER_CATEGORIES]; // arbejdskopi
+
+/* ---------- DOM ---------- */
+const canvas = document.getElementById('wheel');
+const ctx     = canvas.getContext('2d');
+const spinBtn = document.getElementById('spinBtn');
+const nextCatBtn = document.getElementById('nextCatBtn');
+const letterOut   = document.getElementById('letterOut');
+const categoryOut = document.getElementById('categoryOut');
+const metaInfo    = document.getElementById('metaInfo');
+const pointerEl   = document.getElementById('pointer');
+
+/* ---------- Geometri ---------- */
+const W = canvas.width, H = canvas.height;
+const R = W/2, CX = R, CY = R;
+const N = LETTERS.length;
+const SLICE_RAD = (2*Math.PI)/N;
+const SLICE_DEG = 360 / N;
+
+/* ---------- Farver til felter ---------- */
+const COLORS = [
+  "#3b82f6","#f59e0b","#10b981","#ef4444","#8b5cf6",
+  "#06b6d4","#84cc16","#f97316","#14b8a6","#eab308",
+  "#22c55e","#f43f5e","#a855f7","#0ea5e9"
+];
+
+/* ---------- Tegn hjulet (statisk) ---------- */
+function drawWheel(){
+  ctx.clearRect(0,0,W,H);
+  ctx.save();
+  ctx.translate(CX, CY);
+
+  // Base-skive
+  ctx.beginPath(); ctx.arc(0,0,R-6,0,Math.PI*2); ctx.fillStyle="#fff"; ctx.fill();
+  ctx.lineWidth = 10; ctx.strokeStyle = "rgba(0,0,0,.06)"; ctx.stroke();
+
+  for(let i=0;i<N;i++){
+    // Centret af slice i peger mod toppen ved -PI/2
+    const sliceMidNoRot = -Math.PI/2 + i*SLICE_RAD;
+    const start = sliceMidNoRot - SLICE_RAD/2;
+    const end   = sliceMidNoRot + SLICE_RAD/2;
+
+    // Felt
+    ctx.beginPath(); ctx.moveTo(0,0);
+    ctx.arc(0,0,R-20,start,end); ctx.closePath();
+    ctx.fillStyle = COLORS[i % COLORS.length]; ctx.fill();
+
+    // Separator
+    ctx.strokeStyle = "rgba(0,0,0,.08)"; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(0,0);
+    ctx.lineTo((R-20)*Math.cos(start),(R-20)*Math.sin(start)); ctx.stroke();
+
+    // Bogstav horisontalt i feltets midte
+    const mid = sliceMidNoRot;
+    const textR = R*0.68;
+    ctx.save();
+    ctx.translate(textR*Math.cos(mid), textR*Math.sin(mid));
+    ctx.rotate(mid + Math.PI/2);
+    ctx.font = Math.round(R*0.12)+"px Arial, sans-serif";
+    ctx.textAlign="center"; ctx.textBaseline="middle";
+    ctx.fillStyle="rgba(0,0,0,.90)";
+    ctx.shadowColor="rgba(255,255,255,.9)"; ctx.shadowBlur=4;
+    ctx.fillText(LETTERS[i], 0, 0);
+    ctx.restore();
+  }
+
+  // Centerknap (ren pynt)
+  ctx.beginPath(); ctx.arc(0,0,R*0.12,0,Math.PI*2);
+  ctx.fillStyle="#0b1220"; ctx.fill();
+  ctx.lineWidth=3; ctx.strokeStyle="rgba(255,255,255,.25)"; ctx.stroke();
+
+  ctx.restore();
+}
+drawWheel();
+
+/* ---------- Hjælpere til kategori-håndtering ---------- */
+function updateMeta(){
+  metaInfo.textContent = "Kategorier tilbage: " + CATEGORIES.length;
+}
+
+function pickAndRemoveCategory(){
+  if(CATEGORIES.length === 0){
+    // Automatisk genopfyldning
+    CATEGORIES = [...MASTER_CATEGORIES];
+  }
+  const idx = Math.floor(Math.random()*CATEGORIES.length);
+  const chosen = CATEGORIES.splice(idx, 1)[0]; // fjern fra listen
+  categoryOut.textContent = "Kategori: " + chosen;
+  updateMeta();
+}
+
+/* ---------- Spin pointeren (hjulet står stille) ---------- */
+let spinning = false;
+function spinLetter(){
+  if(spinning) return;
+  spinning = true;
+  spinBtn.disabled = true;
+
+  // Vælg vinder (bogstav) — kategori ændres IKKE her
+  const winnerIndex = Math.floor(Math.random()*N);
+
+  // Pilen peger opad ved 0°. For at pege på slice i midten: i * SLICE_DEG
+  const baseSpins = 7 + Math.floor(Math.random()*2); // 7–8 hele omgange
+  const targetDeg = baseSpins*360 + winnerIndex*SLICE_DEG;
+
+  const duration = 3400; // ms
+  // Start CSS-transition
+  pointerEl.style.transition = `transform ${duration}ms cubic-bezier(.15,.75,.1,1)`;
+  // Sæt vinkel via CSS-variabel (bevarer baseRot)
+  pointerEl.style.setProperty('--angle', `${targetDeg}deg`);
+
+  setTimeout(() => {
+    // Lås slutvinkel kompakt og fjern transition (for at undgå opbygning)
+    const finalDeg = targetDeg % 360;
+    pointerEl.style.transition = 'transform 0s';
+    pointerEl.style.setProperty('--angle', `${finalDeg}deg`);
+
+    letterOut.textContent   = "Bogstav: " + LETTERS[winnerIndex];
+
+    spinning = false;
+    spinBtn.disabled = false;
+  }, duration);
+}
+
+/* ---------- Init + event handlers ---------- */
+updateMeta();
+pickAndRemoveCategory(); // vis første kategori
+
+spinBtn.addEventListener('click', spinLetter);
+nextCatBtn.addEventListener('click', pickAndRemoveCategory);
+</script>
+</body>
+</html>
+
